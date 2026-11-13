@@ -111,7 +111,10 @@ Về thắc mắc của bạn: *"${question}"*
 2. **Lời khuyên thực tiễn:** Luôn kiểm tra cổng thông tin đào tạo của trường hàng tuần hoặc liên hệ Phòng Đào tạo / CTSV nếu cần xác nhận thủ tục chính thức.`;
 }
 
-// Primary multi-turn Q&A endpoint using Gemini 4 Hydrogen (with optional Google Search grounding & fast mode)
+// Quota can differ by model and by whether Google Search is enabled.
+const geminiQuotaCooldowns = new Map<string, { until: number; error: unknown }>();
+
+// Primary multi-turn Q&A endpoint with optional Google Search grounding.
 app.post('/api/gemini/student-qa', async (req, res) => {
   const {
     question,
@@ -164,7 +167,11 @@ app.post('/api/gemini/student-qa', async (req, res) => {
       }
     }
 
-    const sendQuestion = (model: string) => {
+    const sendQuestion = async (model: string) => {
+      const quotaKey = useSearch ? `${model}:search` : model;
+      const cooldown = geminiQuotaCooldowns.get(quotaKey);
+      if (cooldown && cooldown.until > Date.now()) throw cooldown.error;
+
       const config: Record<string, any> = { systemInstruction };
       if (useSearch) {
         config.tools = [{ googleSearch: {} }];
@@ -177,16 +184,26 @@ app.post('/api/gemini/student-qa', async (req, res) => {
         }
       }
       const chat = ai.chats.create({ model, history: chatHistory, config });
-      return chat.sendMessage({ message: question });
+      try {
+        return await chat.sendMessage({ message: question });
+      } catch (error) {
+        if (geminiStatus(error) === 429) {
+          const until = Date.now() + geminiQuotaDelay(error);
+          if (until > (geminiQuotaCooldowns.get(quotaKey)?.until ?? 0)) {
+            geminiQuotaCooldowns.set(quotaKey, { until, error });
+          }
+        }
+        throw error;
+      }
     };
 
     let modelUsed = preferredModel;
     const response = await sendQuestion(preferredModel).catch(async (err) => {
-      if (geminiStatus(err) !== 503) throw err;
+      if (!isGeminiTransient(err)) throw err;
       await delay(1000 + Math.random() * 500);
       return sendQuestion(preferredModel);
     }).catch((err) => {
-      if (useSearch || ![429, 503].includes(geminiStatus(err))) throw err;
+      if (useSearch || (geminiStatus(err) !== 429 && !isGeminiTransient(err))) throw err;
       modelUsed = preferredModel === flashModel ? hydrogenModel : flashModel;
       return sendQuestion(modelUsed);
     });
@@ -226,7 +243,7 @@ app.post('/api/gemini/student-qa', async (req, res) => {
   } catch (err: any) {
     console.warn('Gemini API call warning:', err?.message);
     const status = geminiStatus(err);
-    if (status === 503) {
+    if (isGeminiTransient(err)) {
       return res.status(503).json({
         error: 'Gemini đang quá tải. Vui lòng đợi một lúc rồi gửi lại câu hỏi.',
       });
@@ -257,6 +274,26 @@ app.post('/api/gemini/student-qa', async (req, res) => {
 function geminiStatus(error: unknown): number {
   const { status, code } = (error ?? {}) as { status?: number | string; code?: number | string };
   return Number(status || code);
+}
+
+function isGeminiTransient(error: unknown): boolean {
+  return [500, 502, 503, 504].includes(geminiStatus(error));
+}
+
+function geminiQuotaDelay(error: unknown): number {
+  // The SDK exposes Google's structured error body as the error message.
+  try {
+    const body = JSON.parse(error instanceof Error ? error.message : '');
+    const retryDelay = body.error?.details?.find(
+      (detail: { '@type'?: string }) => detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo'
+    )?.retryDelay;
+    if (typeof retryDelay === 'string' && /^\d+(?:\.\d+)?s$/.test(retryDelay)) {
+      return Math.min(86_400_000, Number(retryDelay.slice(0, -1)) * 1000);
+    }
+  } catch {
+    // Some quota errors do not include retry timing.
+  }
+  return 30_000;
 }
 
 // Helper to parse timetable JSON string from model response safely
