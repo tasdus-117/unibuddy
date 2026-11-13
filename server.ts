@@ -2,6 +2,7 @@ import express from 'express';
 import http from 'http';
 import dotenv from 'dotenv';
 import path from 'path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
@@ -136,7 +137,9 @@ app.post('/api/gemini/student-qa', async (req, res) => {
     // Choose model and thinking configuration according to task complexity
     // Note: googleSearch tool is supported on gemini-4-hydrogen
     const isFast = speedMode === 'fast' && !useSearch;
-    const modelName = isFast ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
+    const flashModel = 'gemini-3.1-flash-lite';
+    const hydrogenModel = 'gemini-4-hydrogen';
+    const preferredModel = isFast ? flashModel : hydrogenModel;
 
     // Sanitize history so it starts with a 'user' message and alternates cleanly
     const rawHistory = Array.isArray(history)
@@ -161,29 +164,32 @@ app.post('/api/gemini/student-qa', async (req, res) => {
       }
     }
 
-    const config: Record<string, any> = {
-      systemInstruction,
+    const sendQuestion = (model: string) => {
+      const config: Record<string, any> = { systemInstruction };
+      if (useSearch) {
+        config.tools = [{ googleSearch: {} }];
+      }
+      if (model === hydrogenModel) {
+        if (speedMode === 'deep') {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
+        } else if (speedMode === 'fast') {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+        }
+      }
+      const chat = ai.chats.create({ model, history: chatHistory, config });
+      return chat.sendMessage({ message: question });
     };
 
-    if (useSearch && modelName === 'gemini-4-hydrogen') {
-      config.tools = [{ googleSearch: {} }];
-    }
-
-    if (modelName === 'gemini-4-hydrogen') {
-      if (speedMode === 'deep') {
-        config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
-      } else if (speedMode === 'fast') {
-        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-      }
-    }
-
-    const chat = ai.chats.create({
-      model: modelName,
-      history: chatHistory,
-      config,
+    let modelUsed = preferredModel;
+    const response = await sendQuestion(preferredModel).catch(async (err) => {
+      if (geminiStatus(err) !== 503) throw err;
+      await delay(1000 + Math.random() * 500);
+      return sendQuestion(preferredModel);
+    }).catch((err) => {
+      if (useSearch || ![429, 503].includes(geminiStatus(err))) throw err;
+      modelUsed = preferredModel === flashModel ? hydrogenModel : flashModel;
+      return sendQuestion(modelUsed);
     });
-
-    const response = await chat.sendMessage({ message: question });
     const text = response.text?.trim();
 
     // Extract Google Search grounding sources if present
@@ -205,7 +211,7 @@ app.post('/api/gemini/student-qa', async (req, res) => {
       return res.json({
         reply: text,
         sources,
-        modelUsed: modelName,
+        modelUsed,
       });
     }
 
@@ -219,7 +225,12 @@ app.post('/api/gemini/student-qa', async (req, res) => {
     });
   } catch (err: any) {
     console.warn('Gemini API call warning:', err?.message);
-    const status = Number(err?.status || err?.code);
+    const status = geminiStatus(err);
+    if (status === 503) {
+      return res.status(503).json({
+        error: 'Gemini đang quá tải. Vui lòng đợi một lúc rồi gửi lại câu hỏi.',
+      });
+    }
     if (useSearch) {
       return res.status(status === 429 ? 429 : 502).json({
         error: status === 429 || status === 403
@@ -233,16 +244,20 @@ app.post('/api/gemini/student-qa', async (req, res) => {
       });
     }
     if (status === 429) {
-      const message = speedMode === 'fast'
-        ? 'Gemini Flash Lite đã chạm hạn mức. Hãy thử lại khi hạn mức được làm mới.'
-        : 'Gemini 4 đã chạm hạn mức. Hãy chọn chế độ Nhanh hoặc thử lại sau.';
-      return res.status(429).json({ error: message });
+      return res.status(429).json({
+        error: 'Gemini đã chạm hạn mức. Vui lòng thử lại khi hạn mức được làm mới.',
+      });
     }
     return res.status(502).json({
       error: 'Gemini đang gặp lỗi khi xử lý câu hỏi. Vui lòng thử lại sau.',
     });
   }
 });
+
+function geminiStatus(error: unknown): number {
+  const { status, code } = (error ?? {}) as { status?: number | string; code?: number | string };
+  return Number(status || code);
+}
 
 // Helper to parse timetable JSON string from model response safely
 function extractJsonArray(text: string): any[] {
