@@ -1,0 +1,8 @@
+{
+  "name": "Remix UniBuddy VN - Bạn Đồng Hành Cùng Sinh Viên ",
+  "description": "Nền tảng hỗ trợ sinh viên toàn diện: Quản lý thời khóa biểu, nhắc nhở học tập chủ động, tính điểm tín chỉ GPA, AI cố vấn học vụ các trường ĐH Việt Nam và góc đồng cảm tân sinh viên.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
