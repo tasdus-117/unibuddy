@@ -39,7 +39,8 @@ export const AIStudentAdvisor: React.FC<AdvisorProps> = ({
     const saved = localStorage.getItem('unibuddy_chat_history');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const savedMessages: ChatMessage[] = JSON.parse(saved);
+        return savedMessages.filter((message) => message.modelLabel !== 'fallback');
       } catch (e) {
         // Fallback
       }
@@ -72,7 +73,7 @@ export const AIStudentAdvisor: React.FC<AdvisorProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [useSearch, setUseSearch] = useState(false);
-  const [speedMode, setSpeedMode] = useState<'fast' | 'balanced' | 'deep'>('balanced');
+  const [speedMode, setSpeedMode] = useState<'fast' | 'balanced' | 'deep'>('fast');
   const [isLiveVoiceOpen, setIsLiveVoiceOpen] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -108,10 +109,10 @@ export const AIStudentAdvisor: React.FC<AdvisorProps> = ({
 
     try {
       // Build multi-turn history
-      const historyPayload = messages.slice(-10).map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      const historyPayload = messages
+        .filter((message) => message.role === 'user' || (message.modelLabel && message.modelLabel !== 'fallback'))
+        .slice(-10)
+        .map((message) => ({ role: message.role, content: message.content }));
 
       const res = await fetch('/api/gemini/student-qa', {
         method: 'POST',
@@ -131,11 +132,14 @@ export const AIStudentAdvisor: React.FC<AdvisorProps> = ({
       if (!res.ok) {
         throw new Error(data.error || 'Có lỗi xảy ra khi kết nối máy chủ.');
       }
+      if (typeof data.reply !== 'string' || !data.reply.trim() || data.modelUsed === 'fallback') {
+        throw new Error('Gemini không trả về câu trả lời. Vui lòng thử lại.');
+      }
 
       const botReply: ChatMessage = {
         id: `bot-${Date.now()}`,
         role: 'assistant',
-        content: data.reply || 'Mình đã nhận được câu hỏi, nhưng hiện tại hệ thống đang phản hồi chậm. Bạn thử hỏi lại nhé!',
+        content: data.reply,
         timestamp: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
         mode: selectedMode,
         suggestions: generateFollowUps(selectedMode),
@@ -460,8 +464,7 @@ export const AIStudentAdvisor: React.FC<AdvisorProps> = ({
                   <div className="flex items-center gap-2">
                     {msg.modelLabel && (
                       <span className="px-1.5 py-0.5 rounded bg-slate-200/70 text-[10px] font-medium text-slate-600">
-                        {msg.modelLabel === 'fallback' ? 'Trả lời dự phòng' :
-                          msg.modelLabel === 'gemini-3.1-flash-lite' ? 'Flash Lite' : 'Gemini 4'}
+                        {msg.modelLabel === 'gemini-3.1-flash-lite' ? 'Flash Lite' : 'Gemini 4'}
                       </span>
                     )}
                     <span>{msg.timestamp}</span>

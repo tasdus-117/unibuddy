@@ -119,11 +119,15 @@ app.post('/api/gemini/student-qa', async (req, res) => {
     major = 'Tài chính - Ngân hàng / Kinh tế',
     history = [],
     useSearch = false,
-    speedMode = 'balanced', // 'fast' | 'balanced' | 'deep'
+    speedMode = 'fast', // 'fast' | 'balanced' | 'deep'
   } = req.body;
 
-  if (!question || typeof question !== 'string') {
+  if (typeof question !== 'string' || !question.trim()) {
     return res.status(400).json({ error: 'Vui lòng cung cấp câu hỏi.' });
+  }
+
+  if (!process.env.GEMINI_API_KEY?.trim()) {
+    return res.status(503).json({ error: 'Máy chủ chưa được cấu hình khóa Gemini.' });
   }
 
   try {
@@ -180,7 +184,7 @@ app.post('/api/gemini/student-qa', async (req, res) => {
     });
 
     const response = await chat.sendMessage({ message: question });
-    const text = response.text;
+    const text = response.text?.trim();
 
     // Extract Google Search grounding sources if present
     const rawChunks =
@@ -210,8 +214,9 @@ app.post('/api/gemini/student-qa', async (req, res) => {
         error: 'Google Search không trả về câu trả lời. Hãy thử lại hoặc tắt Google Search để tiếp tục chat.',
       });
     }
-    const fallbackText = getFallbackResponse(question, mode, university);
-    return res.json({ reply: fallbackText, sources: [], modelUsed: 'fallback' });
+    return res.status(502).json({
+      error: 'Gemini không trả về nội dung. Bạn có thể thử diễn đạt lại câu hỏi.',
+    });
   } catch (err: any) {
     console.warn('Gemini API call warning:', err?.message);
     const status = Number(err?.status || err?.code);
@@ -227,8 +232,15 @@ app.post('/api/gemini/student-qa', async (req, res) => {
         error: 'Khóa Gemini bị từ chối. Hãy kiểm tra GEMINI_API_KEY trong file .env.',
       });
     }
-    const fallbackText = getFallbackResponse(question, mode, university);
-    return res.json({ reply: fallbackText, sources: [], modelUsed: 'fallback' });
+    if (status === 429) {
+      const message = speedMode === 'fast'
+        ? 'Gemini Flash Lite đã chạm hạn mức. Hãy thử lại khi hạn mức được làm mới.'
+        : 'Gemini 4 đã chạm hạn mức. Hãy chọn chế độ Nhanh hoặc thử lại sau.';
+      return res.status(429).json({ error: message });
+    }
+    return res.status(502).json({
+      error: 'Gemini đang gặp lỗi khi xử lý câu hỏi. Vui lòng thử lại sau.',
+    });
   }
 });
 
